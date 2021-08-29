@@ -1,0 +1,281 @@
+Parameters:
+  S3Bucket:
+    Type: String
+    Default: s3-bucket-name
+
+  EC2TagKey0:
+    Type: String
+    Default: Name
+  EC2TagValue0:
+    Type: String
+    Default: instance-name
+
+  GitHubRepo:
+    Description: Gitub Repository name
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service/amanawsm/github/repo
+
+  GitHubOAuthToken:
+    Description: Github OAuth Token with full permissions on admin:repo_hook and repo
+    Type: AWS::SSM::Parameter::Value<String>
+    NoEcho: true
+    Default: /service/amanawsm/github/token
+
+  GitHubRepoOwner:
+    Description: Github user where the repository lives
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service/amanawsm/github/user
+
+  GitHubBranch:
+    Description: Github branch of the repository
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /service/amanawsm/github/branch
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3Bucket
+  CodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Path: "/"
+      Policies:
+        - PolicyName: Ec2-CodeDeploy-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - autoscaling:*
+                  - codedeploy:*
+                  - ec2:*
+                  - lambda:*
+                  - ecs:*
+                  - elasticloadbalancing:*
+                  - iam:AddRoleToInstanceProfile
+                  - iam:CreateInstanceProfile
+                  - iam:CreateRole
+                  - iam:DeleteInstanceProfile
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetInstanceProfile
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListRolePolicies
+                  - iam:ListRoles
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:RemoveRoleFromInstanceProfile
+                  - s3:*
+                  - cloudwatch:*
+                  - cloudformation:*
+                  - elasticloadbalancing:*
+                  - autoscaling:*
+                  - iam:CreateServiceLinkedRole
+                  - sns:Publish
+                  - tag:GetResources
+                Resource: "*"
+                Effect: Allow
+  CodeDeployEc2ProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Ec2-CodeDeploy-Profile
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:Get*
+                  - s3:List*
+                Effect: Allow
+                Resource: "*"
+  CodeDeployEc2Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref CodeDeployEc2ProfileRole
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: codepipeline-service
+          PolicyDocument:
+            Statement:
+              - Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - codedeploy:*
+                  - cloudformation:*
+                  - ec2:*
+                  - s3:*
+                  - iam:AddRoleToInstanceProfile
+                  - iam:CreateInstanceProfile
+                  - iam:CreateRole
+                  - iam:DeleteInstanceProfile
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:RemoveRoleFromInstanceProfile
+                Resource: "*"
+                Effect: Allow
+  CodePipelineStack:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn:
+        Fn::Join:
+          - ""
+          - - "arn:aws:iam::"
+            - Ref: AWS::AccountId
+            - ":role/"
+            - Ref: CodePipelineRole
+      Stages:
+        - Name: Source
+          Actions:
+            - InputArtifacts: []
+              Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: "1"
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: MyApp
+              Configuration:
+                Owner: !Ref GitHubRepoOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubOAuthToken
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              InputArtifacts:
+                - Name: MyApp
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CodeDeploy
+              Configuration:
+                ApplicationName:
+                  Ref: CodeDeployApplication
+                DeploymentGroupName:
+                  Ref: CodeDeployGroups
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+  DevInstanceBastion:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      SecurityGroups:
+        - !Ref DevInstanceBastionSecurityGroup
+      KeyName: explancers
+      InstanceInitiatedShutdownBehavior: terminate
+      IamInstanceProfile: !Ref CodeDeployEc2Profile
+      ImageId: ami-07ebfd5b3428b6f4d
+      InstanceType: t2.medium
+      Tags:
+        - Key: "Name"
+          Value: "explancers-backend"
+        - Key: "server"
+          Value: "dev"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -xe
+          sudo apt-get update -y
+          sudo apt-get install -y ruby
+          cd /home/ubuntu
+          wget https://aws-codedeploy-eu-central-1.s3.amazonaws.com/latest/install;
+          sudo chmod +x ./install
+          ./install auto
+          sudo service codedeploy-agent start
+          sudo service codedeploy-agent restart
+          sudo apt-get install nginx -y
+  DevInstanceBastionSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      Tags:
+        - Key: "Name"
+          Value: "explancers-backend"
+        - Key: "server"
+          Value: "dev"
+      GroupDescription: Enable SSH access via port 22 and HTTP via port 80 and 8000
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "443"
+          ToPort: "443"
+          CidrIp: 0.0.0.0/0
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: explancers-backend
+      ComputePlatform: Server
+  CodeDeployGroups:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: explancers-backend-deploy
+      Ec2TagFilters:
+        - Key: !Ref EC2TagKey0
+          Value: !Ref EC2TagValue0
+          Type: KEY_AND_VALUE
+      OnPremisesInstanceTagFilters:
+        - Key: !Ref EC2TagKey0
+          Value: !Ref EC2TagValue0
+          Type: KEY_AND_VALUE
+      ServiceRoleArn:
+        Fn::Join:
+          - ""
+          - - "arn:aws:iam::"
+            - Ref: AWS::AccountId
+            - ":role/"
+            - Ref: CodeDeployRole
